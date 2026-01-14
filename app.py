@@ -151,12 +151,15 @@ TERMINOS_CONSTITUCION = {
 }
 
 # Mapeo de códigos detectados a valores del campo "codigo" en Qdrant
+# IMPORTANTE: Estos valores deben coincidir EXACTAMENTE con los de la base de datos
 CODIGO_MAPPING = {
-    "PENAL": ["Código Penal", "Codigo Penal", "CODIGO PENAL", "CP", "Penal"],
-    "CIVIL": ["Código Civil", "Codigo Civil", "CODIGO CIVIL", "CC", "Civil"],
-    "LABORAL": ["Código de Trabajo", "Codigo de Trabajo", "CODIGO DE TRABAJO", "CT", "Laboral"],
-    "PROCESAL": ["Código Procesal", "Codigo Procesal", "CODIGO PROCESAL", "Procesal"],
-    "CONSTITUCION": ["Constitución", "Constitucion", "CONSTITUCION", "Constitucional"]
+    "PENAL": ["Codigo Penal", "Codigo Procesal Penal"],
+    "CIVIL": ["Codigo Civil", "Codigo De Familia", "Codigo Procesal Civil Y Mercantil"],
+    "LABORAL": ["Codigo De Trabajo"],
+    "PROCESAL": ["Codigo Procesal Penal", "Codigo Procesal Civil Y Mercantil"],
+    "CONSTITUCION": ["Constitucion"],
+    "COMERCIAL": ["Codigo Comercio"],
+    "TRIBUTARIO": ["Codigo Tributario"],
 }
 
 
