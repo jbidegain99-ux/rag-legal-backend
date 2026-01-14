@@ -617,6 +617,68 @@ async def debug_codigos_disponibles(pais: str = Query("SV", description="Código
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error consultando Qdrant: {str(e)}")
 
+
+@app.get("/api/debug/contar-todos")
+async def debug_contar_todos(pais: str = Query("SV", description="Código del país")):
+    """
+    Cuenta TODOS los artículos por código en la colección completa.
+    Usa scroll iterativo para obtener el conteo exacto.
+    """
+    if pais.upper() not in PAISES:
+        raise HTTPException(status_code=400, detail=f"País no soportado: {pais}")
+
+    coleccion = PAISES[pais.upper()]["coleccion"]
+    client = get_qdrant()
+
+    try:
+        # Obtener total de la colección
+        collection_info = client.get_collection(coleccion)
+        total_puntos = collection_info.points_count
+
+        # Scroll completo para contar por código
+        codigos_count = {}
+        offset = None
+        total_procesados = 0
+
+        while True:
+            results, offset = client.scroll(
+                collection_name=coleccion,
+                limit=1000,
+                offset=offset,
+                with_payload=["codigo"]  # Solo traer el campo codigo para ser eficiente
+            )
+
+            if not results:
+                break
+
+            for point in results:
+                codigo = point.payload.get("codigo", "SIN_CODIGO")
+                codigos_count[codigo] = codigos_count.get(codigo, 0) + 1
+                total_procesados += 1
+
+            if offset is None:
+                break
+
+        # Ordenar por cantidad
+        codigos_ordenados = sorted(codigos_count.items(), key=lambda x: -x[1])
+
+        return {
+            "pais": pais.upper(),
+            "coleccion": coleccion,
+            "total_articulos": total_puntos,
+            "total_procesados": total_procesados,
+            "codigos_unicos": len(codigos_count),
+            "codigos": [{"valor": k, "cantidad": v, "porcentaje": round(v/total_procesados*100, 2)} for k, v in codigos_ordenados],
+            "resumen_principales": {
+                "Codigo Penal": codigos_count.get("Codigo Penal", 0),
+                "Codigo Civil": codigos_count.get("Codigo Civil", 0),
+                "Codigo De Trabajo": codigos_count.get("Codigo De Trabajo", 0),
+                "Constitucion": codigos_count.get("Constitucion", 0),
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error consultando Qdrant: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
