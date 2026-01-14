@@ -572,6 +572,48 @@ async def debug_detectar_codigo(query: str = Query(..., description="Query a ana
         }
     }
 
+
+@app.get("/api/debug/codigos-disponibles")
+async def debug_codigos_disponibles(pais: str = Query("SV", description="Código del país")):
+    """
+    Endpoint de diagnóstico para ver los valores únicos del campo 'codigo' en Qdrant.
+    Esto ayuda a identificar los valores exactos para configurar los filtros.
+    """
+    if pais.upper() not in PAISES:
+        raise HTTPException(status_code=400, detail=f"País no soportado: {pais}")
+
+    coleccion = PAISES[pais.upper()]["coleccion"]
+    client = get_qdrant()
+
+    # Obtener una muestra de puntos para ver los valores de 'codigo'
+    try:
+        # Scroll para obtener puntos
+        results, _ = client.scroll(
+            collection_name=coleccion,
+            limit=500,  # Muestra de 500 documentos
+            with_payload=True
+        )
+
+        # Contar valores únicos del campo 'codigo'
+        codigos_count = {}
+        for point in results:
+            codigo = point.payload.get("codigo", "SIN_CODIGO")
+            codigos_count[codigo] = codigos_count.get(codigo, 0) + 1
+
+        # Ordenar por cantidad
+        codigos_ordenados = sorted(codigos_count.items(), key=lambda x: -x[1])
+
+        return {
+            "pais": pais.upper(),
+            "coleccion": coleccion,
+            "muestra_total": len(results),
+            "codigos_unicos": len(codigos_count),
+            "codigos": [{"valor": k, "cantidad": v} for k, v in codigos_ordenados],
+            "nota": "Usar estos valores exactos en CODIGO_MAPPING para que los filtros funcionen"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error consultando Qdrant: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
