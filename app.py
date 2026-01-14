@@ -14,13 +14,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 from openai import OpenAI
+import re
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"  # Mejora: Filtros inteligentes por tipo de código legal
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
@@ -67,6 +69,165 @@ PLANES = {
     "pro": {"consultas_mes": 500, "paises": ["MX", "SV", "GT", "CR", "PA"], "max_tokens": 2000},
     "enterprise": {"consultas_mes": -1, "paises": ["MX", "SV", "GT", "CR", "PA"], "max_tokens": 4000},
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DETECCIÓN INTELIGENTE DE TIPO DE CÓDIGO LEGAL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Términos que indican claramente un tipo de código específico
+TERMINOS_CODIGO_PENAL = {
+    # Delitos contra la vida
+    "homicidio", "asesinato", "parricidio", "femicidio", "feminicidio", "infanticidio",
+    # Delitos contra la integridad
+    "lesiones", "agresión", "violencia", "golpes", "maltrato",
+    # Delitos contra la propiedad
+    "robo", "hurto", "estafa", "fraude", "extorsión", "chantaje", "receptación",
+    "apropiación indebida", "usurpación", "daños", "incendio",
+    # Delitos sexuales
+    "violación", "abuso sexual", "acoso sexual", "estupro",
+    # Delitos contra la libertad
+    "secuestro", "privación de libertad", "trata de personas", "amenazas", "coacciones",
+    # Delitos contra la seguridad
+    "terrorismo", "narcotráfico", "tráfico de drogas", "portación de armas",
+    # Causas de justificación y eximentes
+    "legítima defensa", "legitima defensa", "defensa propia", "estado de necesidad",
+    "inimputabilidad", "eximente", "atenuante", "agravante",
+    # Penas y medidas
+    "prisión", "cárcel", "pena de muerte", "cadena perpetua", "multa penal",
+    "libertad condicional", "libertad vigilada",
+    # Procedimiento penal
+    "denuncia penal", "querella", "acusación", "imputado", "procesado",
+    "sentencia penal", "condena", "absolución",
+    # Términos generales penales
+    "delito", "crimen", "criminal", "delincuente", "pena", "sanción penal",
+    "código penal", "penal", "tipicidad", "antijuridicidad", "culpabilidad",
+    "dolo", "culpa", "tentativa", "consumación", "autoría", "participación",
+    "cómplice", "encubrimiento"
+}
+
+TERMINOS_CODIGO_CIVIL = {
+    # Personas
+    "capacidad civil", "incapacidad", "menor de edad", "emancipación",
+    "persona jurídica", "persona natural",
+    # Familia
+    "matrimonio", "divorcio", "separación", "nulidad matrimonial",
+    "patria potestad", "custodia", "alimentos", "pensión alimenticia",
+    "adopción", "filiación", "paternidad", "maternidad",
+    # Obligaciones y contratos
+    "contrato", "obligación civil", "compraventa", "arrendamiento",
+    "préstamo", "hipoteca", "fianza", "depósito", "mandato",
+    "incumplimiento contractual", "resolución de contrato",
+    # Bienes y propiedad
+    "propiedad", "posesión", "usufructo", "servidumbre",
+    "bienes muebles", "bienes inmuebles", "registro de propiedad",
+    # Sucesiones
+    "herencia", "testamento", "sucesión", "legado", "heredero",
+    "albacea", "partición hereditaria",
+    # Responsabilidad civil
+    "responsabilidad civil", "daños y perjuicios", "indemnización civil",
+    # Términos generales civiles
+    "código civil", "civil", "derecho civil"
+}
+
+TERMINOS_CODIGO_LABORAL = {
+    "despido", "contrato de trabajo", "salario", "sueldo", "vacaciones",
+    "aguinaldo", "indemnización laboral", "jornada laboral", "horas extras",
+    "sindicato", "huelga", "patrono", "empleador", "trabajador", "empleado",
+    "seguridad social", "pensión", "jubilación", "accidente laboral",
+    "enfermedad profesional", "código de trabajo", "laboral", "trabajo"
+}
+
+TERMINOS_CODIGO_PROCESAL = {
+    "demanda", "contestación", "prueba", "sentencia", "apelación",
+    "recurso", "casación", "amparo", "habeas corpus", "medida cautelar",
+    "embargo", "notificación", "citación", "audiencia", "juicio",
+    "proceso", "procedimiento", "jurisdicción", "competencia",
+    "código procesal", "procesal"
+}
+
+TERMINOS_CONSTITUCION = {
+    "constitución", "constitucional", "derechos fundamentales",
+    "garantías constitucionales", "inconstitucionalidad", "amparo constitucional"
+}
+
+# Mapeo de códigos detectados a valores del campo "codigo" en Qdrant
+CODIGO_MAPPING = {
+    "PENAL": ["Código Penal", "Codigo Penal", "CODIGO PENAL", "CP", "Penal"],
+    "CIVIL": ["Código Civil", "Codigo Civil", "CODIGO CIVIL", "CC", "Civil"],
+    "LABORAL": ["Código de Trabajo", "Codigo de Trabajo", "CODIGO DE TRABAJO", "CT", "Laboral"],
+    "PROCESAL": ["Código Procesal", "Codigo Procesal", "CODIGO PROCESAL", "Procesal"],
+    "CONSTITUCION": ["Constitución", "Constitucion", "CONSTITUCION", "Constitucional"]
+}
+
+
+def detectar_tipo_codigo(query: str) -> Optional[str]:
+    """
+    Detecta el tipo de código legal basado en términos en la consulta.
+    Retorna: 'PENAL', 'CIVIL', 'LABORAL', 'PROCESAL', 'CONSTITUCION' o None
+    """
+    query_lower = query.lower()
+
+    # Buscar menciones explícitas primero
+    if any(term in query_lower for term in ["código penal", "codigo penal", "c. penal", "cp "]):
+        return "PENAL"
+    if any(term in query_lower for term in ["código civil", "codigo civil", "c. civil", "cc "]):
+        return "CIVIL"
+    if any(term in query_lower for term in ["código de trabajo", "codigo de trabajo", "laboral"]):
+        return "LABORAL"
+    if any(term in query_lower for term in ["constitución", "constitucion", "constitucional"]):
+        return "CONSTITUCION"
+
+    # Contar coincidencias por categoría
+    scores = {
+        "PENAL": sum(1 for term in TERMINOS_CODIGO_PENAL if term in query_lower),
+        "CIVIL": sum(1 for term in TERMINOS_CODIGO_CIVIL if term in query_lower),
+        "LABORAL": sum(1 for term in TERMINOS_CODIGO_LABORAL if term in query_lower),
+        "PROCESAL": sum(1 for term in TERMINOS_CODIGO_PROCESAL if term in query_lower),
+        "CONSTITUCION": sum(1 for term in TERMINOS_CONSTITUCION if term in query_lower),
+    }
+
+    # Retornar el tipo con mayor score si hay al menos una coincidencia
+    max_score = max(scores.values())
+    if max_score > 0:
+        return max(scores, key=scores.get)
+
+    return None
+
+
+def enriquecer_query(query: str, tipo_codigo: str) -> str:
+    """
+    Enriquece la query con contexto legal para mejorar la búsqueda semántica.
+    """
+    contexto = {
+        "PENAL": "derecho penal delito sanción pena",
+        "CIVIL": "derecho civil obligación contrato",
+        "LABORAL": "derecho laboral trabajo empleado",
+        "PROCESAL": "procedimiento judicial proceso",
+        "CONSTITUCION": "derecho constitucional garantías"
+    }
+
+    if tipo_codigo and tipo_codigo in contexto:
+        return f"{query} {contexto[tipo_codigo]}"
+    return query
+
+
+def crear_filtro_codigo(tipo_codigo: str) -> Optional[Filter]:
+    """
+    Crea un filtro de Qdrant para el tipo de código detectado.
+    """
+    if not tipo_codigo or tipo_codigo not in CODIGO_MAPPING:
+        return None
+
+    valores_codigo = CODIGO_MAPPING[tipo_codigo]
+
+    return Filter(
+        should=[
+            FieldCondition(
+                key="codigo",
+                match=MatchValue(value=valor)
+            ) for valor in valores_codigo
+        ]
+    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INICIALIZACIÓN
@@ -127,6 +288,7 @@ class ConsultaResponse(BaseModel):
     articulos: List[Dict[str, Any]]
     respuesta: Optional[str] = None
     tiempo_ms: float
+    tipo_codigo_detectado: Optional[str] = None  # Tipo de código detectado (PENAL, CIVIL, etc.)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES
@@ -146,26 +308,80 @@ def verificar_acceso(pais: str, plan: str) -> Dict[str, Any]:
     return {"permitido": True}
 
 def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
-    """Busca artículos en Qdrant"""
+    """
+    Busca artículos en Qdrant con filtros inteligentes basados en el tipo de código.
+
+    Mejoras v2.1:
+    - Detecta automáticamente si la consulta es sobre Código Penal, Civil, Laboral, etc.
+    - Aplica filtros de Qdrant para restringir resultados al código correspondiente
+    - Enriquece la query con contexto legal para mejor búsqueda semántica
+    - Fallback a búsqueda sin filtro si no hay suficientes resultados
+    """
     coleccion = PAISES[pais]["coleccion"]
     model = get_model()
     client = get_qdrant()
-    
-    embedding = model.encode(query)
-    results = client.search(
-        collection_name=coleccion,
-        query_vector=embedding.tolist(),
-        limit=top_k,
-        with_payload=True
-    )
-    
+
+    # Detectar tipo de código legal
+    tipo_codigo = detectar_tipo_codigo(query)
+    filtro = crear_filtro_codigo(tipo_codigo)
+
+    # Enriquecer query con contexto legal
+    query_enriquecida = enriquecer_query(query, tipo_codigo)
+    embedding = model.encode(query_enriquecida)
+
+    # Log para debugging
+    if tipo_codigo:
+        print(f"🔍 Query: '{query}' → Tipo detectado: {tipo_codigo}")
+
+    results = []
+
+    # Búsqueda con filtro si se detectó un tipo de código
+    if filtro:
+        try:
+            results = client.search(
+                collection_name=coleccion,
+                query_vector=embedding.tolist(),
+                query_filter=filtro,
+                limit=top_k,
+                with_payload=True
+            )
+            print(f"📊 Resultados con filtro {tipo_codigo}: {len(results)}")
+        except Exception as e:
+            print(f"⚠️ Error en búsqueda con filtro: {e}")
+            results = []
+
+    # Fallback: búsqueda sin filtro si no hay resultados o no se detectó tipo
+    if not results or len(results) < top_k // 2:
+        # Usar embedding original para fallback
+        embedding_original = model.encode(query)
+        fallback_results = client.search(
+            collection_name=coleccion,
+            query_vector=embedding_original.tolist(),
+            limit=top_k,
+            with_payload=True
+        )
+
+        # Si teníamos algunos resultados filtrados, combinar priorizando los filtrados
+        if results:
+            # Obtener IDs de resultados filtrados para evitar duplicados
+            filtered_ids = {r.id for r in results}
+            # Agregar resultados de fallback que no estén ya incluidos
+            for r in fallback_results:
+                if r.id not in filtered_ids and len(results) < top_k:
+                    results.append(r)
+        else:
+            results = fallback_results
+
+        print(f"📊 Resultados finales (con fallback): {len(results)}")
+
     return [{
         "id": r.payload.get("id", ""),
         "numero": r.payload.get("numero", ""),
         "contenido": r.payload.get("contenido", "")[:1500],
         "codigo": r.payload.get("codigo", ""),
         "score": round(r.score, 4),
-        "pais": pais
+        "pais": pais,
+        "tipo_detectado": tipo_codigo  # Incluir para debugging/transparencia
     } for r in results]
 
 def generar_respuesta(query: str, articulos: List[Dict], pais: str, max_tokens: int = 1000) -> str:
@@ -292,22 +508,26 @@ async def consulta(
             "upgrade_sugerido": acceso.get("upgrade")
         })
     
-    # Buscar artículos
+    # Detectar tipo de código para incluir en respuesta
+    tipo_codigo = detectar_tipo_codigo(request.query)
+
+    # Buscar artículos (ahora con filtros inteligentes)
     articulos = buscar_articulos(request.query, pais, request.top_k)
-    
+
     # Generar respuesta
     respuesta = None
     if request.generar_respuesta and articulos:
         max_tokens = PLANES.get(plan, PLANES["free"])["max_tokens"]
         respuesta = generar_respuesta(request.query, articulos, pais, max_tokens)
-    
+
     return ConsultaResponse(
         query=request.query,
         pais=pais,
         pais_nombre=PAISES[pais]["nombre"],
         articulos=articulos,
         respuesta=respuesta,
-        tiempo_ms=round((time.time() - inicio) * 1000, 2)
+        tiempo_ms=round((time.time() - inicio) * 1000, 2),
+        tipo_codigo_detectado=tipo_codigo
     )
 
 # Endpoint legacy para compatibilidad
@@ -315,6 +535,42 @@ async def consulta(
 async def query_legacy(request: ConsultaRequest):
     """Endpoint legacy - redirige a /api/consulta"""
     return await consulta(request)
+
+
+@app.get("/api/debug/detectar-codigo")
+async def debug_detectar_codigo(query: str = Query(..., description="Query a analizar")):
+    """
+    Endpoint de debug para probar la detección de tipo de código legal.
+    Útil para verificar que términos como 'robo', 'hurto', 'legítima defensa'
+    son correctamente clasificados como Código Penal.
+    """
+    tipo_detectado = detectar_tipo_codigo(query)
+    query_enriquecida = enriquecer_query(query, tipo_detectado)
+
+    # Mostrar qué términos coincidieron
+    query_lower = query.lower()
+    terminos_coincidentes = {
+        "PENAL": [t for t in TERMINOS_CODIGO_PENAL if t in query_lower],
+        "CIVIL": [t for t in TERMINOS_CODIGO_CIVIL if t in query_lower],
+        "LABORAL": [t for t in TERMINOS_CODIGO_LABORAL if t in query_lower],
+        "PROCESAL": [t for t in TERMINOS_CODIGO_PROCESAL if t in query_lower],
+        "CONSTITUCION": [t for t in TERMINOS_CONSTITUCION if t in query_lower],
+    }
+
+    return {
+        "query_original": query,
+        "tipo_codigo_detectado": tipo_detectado,
+        "query_enriquecida": query_enriquecida,
+        "filtro_qdrant": CODIGO_MAPPING.get(tipo_detectado, []) if tipo_detectado else None,
+        "terminos_coincidentes": {k: v for k, v in terminos_coincidentes.items() if v},
+        "scores": {
+            "PENAL": len(terminos_coincidentes["PENAL"]),
+            "CIVIL": len(terminos_coincidentes["CIVIL"]),
+            "LABORAL": len(terminos_coincidentes["LABORAL"]),
+            "PROCESAL": len(terminos_coincidentes["PROCESAL"]),
+            "CONSTITUCION": len(terminos_coincidentes["CONSTITUCION"]),
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
