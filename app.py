@@ -807,6 +807,43 @@ async def debug_test_filtro(
     }
 
 
+@app.post("/api/admin/crear-indice-codigo")
+async def crear_indice_codigo(pais: str = Query("SV", description="Código del país")):
+    """
+    ADMIN: Crea el índice necesario para el campo 'codigo' en Qdrant.
+    Esto es necesario para que los filtros funcionen.
+    """
+    from qdrant_client.models import PayloadSchemaType
+
+    if pais.upper() not in PAISES:
+        raise HTTPException(status_code=400, detail=f"País no soportado: {pais}")
+
+    coleccion = PAISES[pais.upper()]["coleccion"]
+    client = get_qdrant()
+
+    try:
+        # Crear índice de tipo keyword para el campo 'codigo'
+        client.create_payload_index(
+            collection_name=coleccion,
+            field_name="codigo",
+            field_schema=PayloadSchemaType.KEYWORD
+        )
+        return {
+            "success": True,
+            "message": f"Índice creado para campo 'codigo' en colección '{coleccion}'",
+            "pais": pais.upper()
+        }
+    except Exception as e:
+        # Si ya existe, no es error
+        if "already exists" in str(e).lower():
+            return {
+                "success": True,
+                "message": f"Índice ya existía para campo 'codigo' en colección '{coleccion}'",
+                "pais": pais.upper()
+            }
+        raise HTTPException(status_code=500, detail=f"Error creando índice: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
