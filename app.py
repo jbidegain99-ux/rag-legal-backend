@@ -631,10 +631,6 @@ async def debug_contar_todos(pais: str = Query("SV", description="Código del pa
     client = get_qdrant()
 
     try:
-        # Obtener total de la colección
-        collection_info = client.get_collection(coleccion)
-        total_puntos = collection_info.points_count
-
         # Scroll completo para contar por código
         codigos_count = {}
         offset = None
@@ -665,10 +661,9 @@ async def debug_contar_todos(pais: str = Query("SV", description="Código del pa
         return {
             "pais": pais.upper(),
             "coleccion": coleccion,
-            "total_articulos": total_puntos,
-            "total_procesados": total_procesados,
+            "total_articulos": total_procesados,
             "codigos_unicos": len(codigos_count),
-            "codigos": [{"valor": k, "cantidad": v, "porcentaje": round(v/total_procesados*100, 2)} for k, v in codigos_ordenados],
+            "codigos": [{"valor": k, "cantidad": v, "porcentaje": round(v/total_procesados*100, 2) if total_procesados > 0 else 0} for k, v in codigos_ordenados],
             "resumen_principales": {
                 "Codigo Penal": codigos_count.get("Codigo Penal", 0),
                 "Codigo Civil": codigos_count.get("Codigo Civil", 0),
