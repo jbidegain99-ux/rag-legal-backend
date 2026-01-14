@@ -12,7 +12,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 from openai import OpenAI
@@ -22,7 +22,7 @@ import re
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.3.0"  # Fix: HyDE templates mejorados + Endpoint de feedback
+VERSION = "2.4.0"  # Feature: Cross-encoder reranking + Admin endpoints multi-país
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
@@ -255,6 +255,10 @@ app.add_middleware(
 _model = None
 _qdrant = None
 _openai = None
+_cross_encoder = None
+
+# Modelo de cross-encoder para reranking (multilingüe, funciona bien con español)
+CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 def get_model():
     global _model
@@ -262,6 +266,13 @@ def get_model():
         print("📦 Cargando modelo de embeddings...")
         _model = SentenceTransformer('hiiamsid/sentence_similarity_spanish_es')
     return _model
+
+def get_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        print("📦 Cargando cross-encoder para reranking...")
+        _cross_encoder = CrossEncoder(CROSS_ENCODER_MODEL)
+    return _cross_encoder
 
 def get_qdrant():
     global _qdrant
@@ -275,6 +286,39 @@ def get_openai():
         _openai = OpenAI(api_key=OPENAI_KEY)
     return _openai
 
+
+def rerank_with_cross_encoder(query: str, results: List[Dict], top_k: int = 5) -> List[Dict]:
+    """
+    Re-rankea los resultados usando un cross-encoder para mayor precisión.
+
+    El cross-encoder evalúa cada par (query, documento) de forma más precisa
+    que el bi-encoder, pero es más lento. Por eso se usa como segundo paso.
+    """
+    if not results:
+        return results
+
+    cross_encoder = get_cross_encoder()
+
+    # Preparar pares (query, contenido) para el cross-encoder
+    pairs = [(query, r.get("contenido", "")[:512]) for r in results]  # Limitar a 512 chars
+
+    # Obtener scores del cross-encoder
+    scores = cross_encoder.predict(pairs)
+
+    # Añadir scores a los resultados
+    for i, result in enumerate(results):
+        result["score_original"] = result.get("score", 0)
+        result["score_rerank"] = float(scores[i])
+
+    # Ordenar por score de reranking (mayor primero)
+    results_reranked = sorted(results, key=lambda x: x.get("score_rerank", 0), reverse=True)
+
+    # Actualizar score final y retornar top_k
+    for r in results_reranked:
+        r["score"] = r["score_rerank"]
+
+    return results_reranked[:top_k]
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODELOS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -284,6 +328,7 @@ class ConsultaRequest(BaseModel):
     pais: str = "SV"
     top_k: int = 5
     generar_respuesta: bool = True
+    rerank: bool = True  # Usar cross-encoder para reranking (mejora precisión)
 
 class ConsultaResponse(BaseModel):
     query: str
@@ -293,6 +338,7 @@ class ConsultaResponse(BaseModel):
     respuesta: Optional[str] = None
     tiempo_ms: float
     tipo_codigo_detectado: Optional[str] = None  # Tipo de código detectado (PENAL, CIVIL, etc.)
+    reranked: bool = False  # Indica si se usó cross-encoder reranking
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES
@@ -374,14 +420,15 @@ def generar_query_hyde(query: str, tipo_codigo: str) -> str:
     return query
 
 
-def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
+def buscar_articulos(query: str, pais: str, top_k: int = 5, rerank: bool = True) -> List[Dict]:
     """
     Busca artículos en Qdrant con filtros inteligentes basados en el tipo de código.
 
-    Mejoras v2.2 (basado en investigación RLM):
+    Mejoras v2.4 (basado en investigación RLM):
     - HyDE: Genera documento hipotético para mejor matching semántico
     - Filtro ESTRICTO: No hace fallback cuando se detecta tipo de código
     - Query enrichment: Añade contexto legal a la búsqueda
+    - Cross-encoder reranking: Re-rankea resultados para mayor precisión
     - Fallback inteligente: Solo cuando NO se detecta tipo específico
     """
     coleccion = PAISES[pais]["coleccion"]
@@ -397,6 +444,8 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
     print(f"🔍 Filtro: {CODIGO_MAPPING.get(tipo_codigo, 'Sin filtro')}")
 
     results = []
+    # Para reranking, buscamos más candidatos inicialmente
+    search_limit = top_k * 3 if rerank else top_k * 2
 
     if tipo_codigo and filtro:
         # MODO ESTRICTO: Cuando detectamos un tipo específico, FORZAMOS el filtro
@@ -411,7 +460,7 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
                 collection_name=coleccion,
                 query_vector=embedding.tolist(),
                 query_filter=filtro,
-                limit=top_k * 2,  # Buscar más para tener margen
+                limit=search_limit,
                 with_payload=True
             )
             print(f"📊 Resultados con filtro {tipo_codigo}: {len(results)}")
@@ -425,7 +474,7 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
                     collection_name=coleccion,
                     query_vector=embedding_simple.tolist(),
                     query_filter=filtro,
-                    limit=top_k * 2,
+                    limit=search_limit,
                     with_payload=True
                 )
                 print(f"📊 Resultados con query enriquecida: {len(results_simple)}")
@@ -437,9 +486,6 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
                         results.append(r)
                         seen_ids.add(r.id)
 
-            # Limitar a top_k
-            results = results[:top_k]
-
         except Exception as e:
             print(f"⚠️ Error en búsqueda con filtro: {e}")
             # Si hay error con el filtro, intentar sin filtro como último recurso
@@ -447,7 +493,7 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
             results = client.search(
                 collection_name=coleccion,
                 query_vector=embedding_original.tolist(),
-                limit=top_k,
+                limit=search_limit,
                 with_payload=True
             )
     else:
@@ -456,12 +502,13 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
         results = client.search(
             collection_name=coleccion,
             query_vector=embedding.tolist(),
-            limit=top_k,
+            limit=search_limit,
             with_payload=True
         )
         print(f"📊 Resultados sin filtro (query general): {len(results)}")
 
-    return [{
+    # Convertir resultados a diccionarios
+    articulos = [{
         "id": r.payload.get("id", ""),
         "numero": r.payload.get("numero", ""),
         "contenido": r.payload.get("contenido", "")[:1500],
@@ -470,6 +517,17 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
         "pais": pais,
         "tipo_detectado": tipo_codigo
     } for r in results]
+
+    # Aplicar cross-encoder reranking si está habilitado
+    if rerank and len(articulos) > 0:
+        print(f"🔄 Aplicando cross-encoder reranking a {len(articulos)} candidatos...")
+        articulos = rerank_with_cross_encoder(query, articulos, top_k)
+        print(f"✅ Reranking completado. Top {len(articulos)} resultados seleccionados.")
+    else:
+        # Sin reranking, solo limitar a top_k
+        articulos = articulos[:top_k]
+
+    return articulos
 
 def generar_respuesta(query: str, articulos: List[Dict], pais: str, max_tokens: int = 1000) -> str:
     """Genera respuesta con GPT"""
@@ -598,8 +656,8 @@ async def consulta(
     # Detectar tipo de código para incluir en respuesta
     tipo_codigo = detectar_tipo_codigo(request.query)
 
-    # Buscar artículos (ahora con filtros inteligentes)
-    articulos = buscar_articulos(request.query, pais, request.top_k)
+    # Buscar artículos (ahora con filtros inteligentes y reranking opcional)
+    articulos = buscar_articulos(request.query, pais, request.top_k, rerank=request.rerank)
 
     # Generar respuesta
     respuesta = None
@@ -614,7 +672,8 @@ async def consulta(
         articulos=articulos,
         respuesta=respuesta,
         tiempo_ms=round((time.time() - inicio) * 1000, 2),
-        tipo_codigo_detectado=tipo_codigo
+        tipo_codigo_detectado=tipo_codigo,
+        reranked=request.rerank
     )
 
 # Endpoint legacy para compatibilidad
@@ -866,6 +925,158 @@ async def crear_indice_codigo(pais: str = Query("SV", description="Código del p
                 "pais": pais.upper()
             }
         raise HTTPException(status_code=500, detail=f"Error creando índice: {str(e)}")
+
+
+@app.post("/api/admin/crear-indices-todos")
+async def crear_indices_todos():
+    """
+    ADMIN: Crea índices para el campo 'codigo' en TODOS los países configurados.
+    Útil para configuración inicial del sistema multi-país.
+    """
+    from qdrant_client.models import PayloadSchemaType
+
+    client = get_qdrant()
+    resultados = []
+
+    for codigo_pais, info in PAISES.items():
+        if not info.get("activo", False):
+            resultados.append({
+                "pais": codigo_pais,
+                "nombre": info["nombre"],
+                "status": "skipped",
+                "message": "País no activo"
+            })
+            continue
+
+        coleccion = info["coleccion"]
+
+        try:
+            # Verificar si la colección existe
+            try:
+                collection_info = client.get_collection(coleccion)
+                vectores = collection_info.points_count
+            except Exception:
+                resultados.append({
+                    "pais": codigo_pais,
+                    "nombre": info["nombre"],
+                    "coleccion": coleccion,
+                    "status": "no_existe",
+                    "message": f"Colección '{coleccion}' no existe en Qdrant"
+                })
+                continue
+
+            # Crear índice
+            client.create_payload_index(
+                collection_name=coleccion,
+                field_name="codigo",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            resultados.append({
+                "pais": codigo_pais,
+                "nombre": info["nombre"],
+                "coleccion": coleccion,
+                "vectores": vectores,
+                "status": "created",
+                "message": "Índice creado exitosamente"
+            })
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                resultados.append({
+                    "pais": codigo_pais,
+                    "nombre": info["nombre"],
+                    "coleccion": coleccion,
+                    "vectores": vectores if 'vectores' in dir() else 0,
+                    "status": "exists",
+                    "message": "Índice ya existía"
+                })
+            else:
+                resultados.append({
+                    "pais": codigo_pais,
+                    "nombre": info["nombre"],
+                    "coleccion": coleccion,
+                    "status": "error",
+                    "message": str(e)
+                })
+
+    # Resumen
+    creados = len([r for r in resultados if r["status"] == "created"])
+    existentes = len([r for r in resultados if r["status"] == "exists"])
+    errores = len([r for r in resultados if r["status"] in ["error", "no_existe"]])
+
+    return {
+        "success": True,
+        "resumen": {
+            "total_paises": len(PAISES),
+            "indices_creados": creados,
+            "indices_existentes": existentes,
+            "errores": errores
+        },
+        "detalle": resultados
+    }
+
+
+@app.get("/api/admin/verificar-paises")
+async def verificar_paises():
+    """
+    ADMIN: Verifica el estado de todos los países configurados.
+    Muestra qué colecciones existen, cuántos vectores tienen y si tienen índice.
+    """
+    client = get_qdrant()
+    resultados = []
+
+    for codigo_pais, info in PAISES.items():
+        pais_info = {
+            "pais": codigo_pais,
+            "nombre": info["nombre"],
+            "bandera": info["bandera"],
+            "coleccion": info["coleccion"],
+            "activo": info.get("activo", False),
+            "limitado": info.get("limitado", False),
+        }
+
+        try:
+            # Verificar si la colección existe y obtener info
+            collection_info = client.get_collection(info["coleccion"])
+            pais_info["existe"] = True
+            pais_info["vectores"] = collection_info.points_count
+            pais_info["status"] = "ready" if collection_info.points_count > 0 else "empty"
+
+            # Verificar índices (si hay payload_schema)
+            if hasattr(collection_info, 'payload_schema') and collection_info.payload_schema:
+                indices = list(collection_info.payload_schema.keys())
+                pais_info["indices"] = indices
+                pais_info["tiene_indice_codigo"] = "codigo" in indices
+            else:
+                pais_info["indices"] = []
+                pais_info["tiene_indice_codigo"] = False
+
+        except Exception as e:
+            pais_info["existe"] = False
+            pais_info["vectores"] = 0
+            pais_info["status"] = "no_collection"
+            pais_info["error"] = str(e)
+            pais_info["tiene_indice_codigo"] = False
+
+        resultados.append(pais_info)
+
+    # Resumen
+    listos = [r for r in resultados if r.get("status") == "ready" and r.get("tiene_indice_codigo")]
+    sin_indice = [r for r in resultados if r.get("status") == "ready" and not r.get("tiene_indice_codigo")]
+    sin_datos = [r for r in resultados if r.get("status") in ["empty", "no_collection"]]
+
+    return {
+        "resumen": {
+            "total_paises": len(PAISES),
+            "listos_para_usar": len(listos),
+            "necesitan_indice": len(sin_indice),
+            "sin_datos": len(sin_datos)
+        },
+        "paises_listos": [r["pais"] for r in listos],
+        "paises_sin_indice": [r["pais"] for r in sin_indice],
+        "paises_sin_datos": [r["pais"] for r in sin_datos],
+        "detalle": resultados,
+        "version": VERSION
+    }
 
 
 if __name__ == "__main__":
