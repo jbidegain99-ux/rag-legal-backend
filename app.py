@@ -22,7 +22,7 @@ import re
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.2.0"  # Mejora: HyDE + Filtros estrictos basados en investigación RLM
+VERSION = "2.3.0"  # HyDE + Filtros estrictos + Admin endpoints multi-país
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
