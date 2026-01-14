@@ -217,6 +217,7 @@ def enriquecer_query(query: str, tipo_codigo: str) -> str:
 def crear_filtro_codigo(tipo_codigo: str) -> Optional[Filter]:
     """
     Crea un filtro de Qdrant para el tipo de código detectado.
+    Usa MatchAny para buscar cualquiera de los valores posibles.
     """
     if not tipo_codigo or tipo_codigo not in CODIGO_MAPPING:
         return None
@@ -224,11 +225,11 @@ def crear_filtro_codigo(tipo_codigo: str) -> Optional[Filter]:
     valores_codigo = CODIGO_MAPPING[tipo_codigo]
 
     return Filter(
-        should=[
+        must=[
             FieldCondition(
                 key="codigo",
-                match=MatchValue(value=valor)
-            ) for valor in valores_codigo
+                match=MatchAny(any=valores_codigo)
+            )
         ]
     )
 
