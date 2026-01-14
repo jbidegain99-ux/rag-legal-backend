@@ -734,6 +734,79 @@ async def debug_contar_todos(pais: str = Query("SV", description="Código del pa
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error consultando Qdrant: {str(e)}")
 
+@app.get("/api/debug/test-filtro")
+async def debug_test_filtro(
+    query: str = Query("robo", description="Query a buscar"),
+    pais: str = Query("SV", description="Código del país")
+):
+    """
+    Debug: Prueba directamente el filtro de Qdrant para verificar que funciona.
+    """
+    if pais.upper() not in PAISES:
+        raise HTTPException(status_code=400, detail=f"País no soportado: {pais}")
+
+    coleccion = PAISES[pais.upper()]["coleccion"]
+    model = get_model()
+    client = get_qdrant()
+
+    tipo_codigo = detectar_tipo_codigo(query)
+    valores_filtro = CODIGO_MAPPING.get(tipo_codigo, [])
+
+    # Crear embedding simple
+    embedding = model.encode(query)
+
+    # 1. Búsqueda SIN filtro
+    sin_filtro = client.search(
+        collection_name=coleccion,
+        query_vector=embedding.tolist(),
+        limit=5,
+        with_payload=True
+    )
+
+    # 2. Búsqueda CON filtro (si hay tipo detectado)
+    con_filtro = []
+    filtro_usado = None
+    if tipo_codigo and valores_filtro:
+        filtro_usado = {
+            "must": [{"key": "codigo", "match": {"any": valores_filtro}}]
+        }
+        try:
+            filtro = Filter(
+                must=[
+                    FieldCondition(
+                        key="codigo",
+                        match=MatchAny(any=valores_filtro)
+                    )
+                ]
+            )
+            con_filtro = client.search(
+                collection_name=coleccion,
+                query_vector=embedding.tolist(),
+                query_filter=filtro,
+                limit=5,
+                with_payload=True
+            )
+        except Exception as e:
+            return {"error": f"Error con filtro: {str(e)}"}
+
+    return {
+        "query": query,
+        "tipo_detectado": tipo_codigo,
+        "valores_filtro": valores_filtro,
+        "filtro_usado": filtro_usado,
+        "resultados_SIN_filtro": [
+            {"numero": r.payload.get("numero"), "codigo": r.payload.get("codigo"), "score": round(r.score, 4)}
+            for r in sin_filtro
+        ],
+        "resultados_CON_filtro": [
+            {"numero": r.payload.get("numero"), "codigo": r.payload.get("codigo"), "score": round(r.score, 4)}
+            for r in con_filtro
+        ],
+        "cantidad_sin_filtro": len(sin_filtro),
+        "cantidad_con_filtro": len(con_filtro)
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
