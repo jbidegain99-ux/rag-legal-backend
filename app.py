@@ -22,7 +22,7 @@ import re
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.4.0"  # Feature: Cross-encoder reranking + Admin endpoints multi-país
+VERSION = "2.4.1"  # Force rebuild: Cross-encoder reranking + Admin endpoints multi-país
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
