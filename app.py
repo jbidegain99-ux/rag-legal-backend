@@ -22,7 +22,7 @@ import re
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.1.0"  # Mejora: Filtros inteligentes por tipo de código legal
+VERSION = "2.2.0"  # Mejora: HyDE + Filtros estrictos basados en investigación RLM
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
@@ -311,15 +311,54 @@ def verificar_acceso(pais: str, plan: str) -> Dict[str, Any]:
         }
     return {"permitido": True}
 
+def generar_query_hyde(query: str, tipo_codigo: str) -> str:
+    """
+    Genera una query expandida estilo HyDE (Hypothetical Document Embeddings).
+    En lugar de buscar solo "robo", genera un documento hipotético que describe
+    cómo se vería un artículo sobre robo.
+    """
+    templates_hyde = {
+        "PENAL": {
+            "robo": "Artículo sobre el delito de robo. El que se apoderare ilegítimamente de cosa mueble total o parcialmente ajena, con fuerza en las cosas o violencia o intimidación en las personas, será sancionado con prisión.",
+            "hurto": "Artículo sobre el delito de hurto. El que se apoderare ilegítimamente de cosa mueble total o parcialmente ajena será sancionado con prisión. Hurto simple sin violencia ni fuerza.",
+            "homicidio": "Artículo sobre el delito de homicidio. El que matare a otro será sancionado con prisión. Homicidio simple, agravado, culposo.",
+            "estafa": "Artículo sobre el delito de estafa. El que mediante engaño obtuviere un beneficio patrimonial en perjuicio ajeno será sancionado.",
+            "legítima defensa": "Artículo sobre legítima defensa como causa de justificación. No es punible quien actúa en defensa de su persona, honor o bienes, o de terceros, repeliendo una agresión ilegítima, actual o inminente.",
+            "secuestro": "Artículo sobre el delito de secuestro y privación de libertad. El que privare a otro de su libertad personal será sancionado con prisión.",
+            "violación": "Artículo sobre el delito de violación. El que mediante violencia tuviere acceso carnal con otra persona será sancionado.",
+            "default": "Artículo del Código Penal sobre delitos y penas. Sanción penal, prisión, multa, responsabilidad criminal."
+        },
+        "CIVIL": {
+            "default": "Artículo del Código Civil sobre obligaciones, contratos, propiedad, familia, sucesiones."
+        },
+        "LABORAL": {
+            "default": "Artículo del Código de Trabajo sobre relación laboral, derechos del trabajador, obligaciones del patrono."
+        }
+    }
+
+    query_lower = query.lower()
+
+    if tipo_codigo and tipo_codigo in templates_hyde:
+        tipo_templates = templates_hyde[tipo_codigo]
+        # Buscar template específico para la query
+        for key, template in tipo_templates.items():
+            if key != "default" and key in query_lower:
+                return f"{query}. {template}"
+        # Usar template por defecto del tipo
+        return f"{query}. {tipo_templates.get('default', '')}"
+
+    return query
+
+
 def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
     """
     Busca artículos en Qdrant con filtros inteligentes basados en el tipo de código.
 
-    Mejoras v2.1:
-    - Detecta automáticamente si la consulta es sobre Código Penal, Civil, Laboral, etc.
-    - Aplica filtros de Qdrant para restringir resultados al código correspondiente
-    - Enriquece la query con contexto legal para mejor búsqueda semántica
-    - Fallback a búsqueda sin filtro si no hay suficientes resultados
+    Mejoras v2.2 (basado en investigación RLM):
+    - HyDE: Genera documento hipotético para mejor matching semántico
+    - Filtro ESTRICTO: No hace fallback cuando se detecta tipo de código
+    - Query enrichment: Añade contexto legal a la búsqueda
+    - Fallback inteligente: Solo cuando NO se detecta tipo específico
     """
     coleccion = PAISES[pais]["coleccion"]
     model = get_model()
@@ -329,54 +368,74 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
     tipo_codigo = detectar_tipo_codigo(query)
     filtro = crear_filtro_codigo(tipo_codigo)
 
-    # Enriquecer query con contexto legal
-    query_enriquecida = enriquecer_query(query, tipo_codigo)
-    embedding = model.encode(query_enriquecida)
-
     # Log para debugging
-    if tipo_codigo:
-        print(f"🔍 Query: '{query}' → Tipo detectado: {tipo_codigo}")
+    print(f"🔍 Query: '{query}' → Tipo detectado: {tipo_codigo}")
+    print(f"🔍 Filtro: {CODIGO_MAPPING.get(tipo_codigo, 'Sin filtro')}")
 
     results = []
 
-    # Búsqueda con filtro si se detectó un tipo de código
-    if filtro:
+    if tipo_codigo and filtro:
+        # MODO ESTRICTO: Cuando detectamos un tipo específico, FORZAMOS el filtro
+        # Usar HyDE para mejorar el matching semántico
+        query_hyde = generar_query_hyde(query, tipo_codigo)
+        print(f"📝 Query HyDE: '{query_hyde[:100]}...'")
+
+        embedding = model.encode(query_hyde)
+
         try:
             results = client.search(
                 collection_name=coleccion,
                 query_vector=embedding.tolist(),
                 query_filter=filtro,
-                limit=top_k,
+                limit=top_k * 2,  # Buscar más para tener margen
                 with_payload=True
             )
             print(f"📊 Resultados con filtro {tipo_codigo}: {len(results)}")
+
+            # Si no hay resultados con HyDE, intentar con query enriquecida simple
+            if len(results) < top_k:
+                query_enriquecida = enriquecer_query(query, tipo_codigo)
+                embedding_simple = model.encode(query_enriquecida)
+
+                results_simple = client.search(
+                    collection_name=coleccion,
+                    query_vector=embedding_simple.tolist(),
+                    query_filter=filtro,
+                    limit=top_k * 2,
+                    with_payload=True
+                )
+                print(f"📊 Resultados con query enriquecida: {len(results_simple)}")
+
+                # Combinar resultados, evitando duplicados
+                seen_ids = {r.id for r in results}
+                for r in results_simple:
+                    if r.id not in seen_ids:
+                        results.append(r)
+                        seen_ids.add(r.id)
+
+            # Limitar a top_k
+            results = results[:top_k]
+
         except Exception as e:
             print(f"⚠️ Error en búsqueda con filtro: {e}")
-            results = []
-
-    # Fallback: búsqueda sin filtro si no hay resultados o no se detectó tipo
-    if not results or len(results) < top_k // 2:
-        # Usar embedding original para fallback
-        embedding_original = model.encode(query)
-        fallback_results = client.search(
+            # Si hay error con el filtro, intentar sin filtro como último recurso
+            embedding_original = model.encode(query)
+            results = client.search(
+                collection_name=coleccion,
+                query_vector=embedding_original.tolist(),
+                limit=top_k,
+                with_payload=True
+            )
+    else:
+        # MODO GENERAL: Sin tipo detectado, búsqueda abierta
+        embedding = model.encode(query)
+        results = client.search(
             collection_name=coleccion,
-            query_vector=embedding_original.tolist(),
+            query_vector=embedding.tolist(),
             limit=top_k,
             with_payload=True
         )
-
-        # Si teníamos algunos resultados filtrados, combinar priorizando los filtrados
-        if results:
-            # Obtener IDs de resultados filtrados para evitar duplicados
-            filtered_ids = {r.id for r in results}
-            # Agregar resultados de fallback que no estén ya incluidos
-            for r in fallback_results:
-                if r.id not in filtered_ids and len(results) < top_k:
-                    results.append(r)
-        else:
-            results = fallback_results
-
-        print(f"📊 Resultados finales (con fallback): {len(results)}")
+        print(f"📊 Resultados sin filtro (query general): {len(results)}")
 
     return [{
         "id": r.payload.get("id", ""),
@@ -385,7 +444,7 @@ def buscar_articulos(query: str, pais: str, top_k: int = 5) -> List[Dict]:
         "codigo": r.payload.get("codigo", ""),
         "score": round(r.score, 4),
         "pais": pais,
-        "tipo_detectado": tipo_codigo  # Incluir para debugging/transparencia
+        "tipo_detectado": tipo_codigo
     } for r in results]
 
 def generar_respuesta(query: str, articulos: List[Dict], pais: str, max_tokens: int = 1000) -> str:
