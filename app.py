@@ -22,7 +22,7 @@ import re
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.2.0"  # Mejora: HyDE + Filtros estrictos basados en investigación RLM
+VERSION = "2.3.0"  # Fix: HyDE templates mejorados + Endpoint de feedback
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
@@ -319,19 +319,43 @@ def generar_query_hyde(query: str, tipo_codigo: str) -> str:
     """
     templates_hyde = {
         "PENAL": {
-            "robo": "Artículo sobre el delito de robo. El que se apoderare ilegítimamente de cosa mueble total o parcialmente ajena, con fuerza en las cosas o violencia o intimidación en las personas, será sancionado con prisión.",
-            "hurto": "Artículo sobre el delito de hurto. El que se apoderare ilegítimamente de cosa mueble total o parcialmente ajena será sancionado con prisión. Hurto simple sin violencia ni fuerza.",
-            "homicidio": "Artículo sobre el delito de homicidio. El que matare a otro será sancionado con prisión. Homicidio simple, agravado, culposo.",
-            "estafa": "Artículo sobre el delito de estafa. El que mediante engaño obtuviere un beneficio patrimonial en perjuicio ajeno será sancionado.",
-            "legítima defensa": "Artículo sobre legítima defensa como causa de justificación. No es punible quien actúa en defensa de su persona, honor o bienes, o de terceros, repeliendo una agresión ilegítima, actual o inminente.",
-            "secuestro": "Artículo sobre el delito de secuestro y privación de libertad. El que privare a otro de su libertad personal será sancionado con prisión.",
-            "violación": "Artículo sobre el delito de violación. El que mediante violencia tuviere acceso carnal con otra persona será sancionado.",
+            # Delitos contra la propiedad - MUY específicos
+            "robo": "Artículo sobre el delito de ROBO. El que con ánimo de lucro se apoderare de cosa mueble ajena empleando FUERZA EN LAS COSAS o VIOLENCIA O INTIMIDACIÓN en las personas, será sancionado con prisión de seis a diez años. Robo agravado cuando se comete con arma, en casa habitada, o por dos o más personas.",
+            "hurto": "Artículo sobre el delito de HURTO. El que con ánimo de lucro se apoderare de cosa mueble ajena SIN FUERZA ni violencia será sancionado con prisión de dos a cinco años. El hurto se diferencia del robo porque NO hay fuerza ni intimidación. Hurto simple, hurto agravado.",
+
+            # Delitos contra la vida - Diferenciar tipos de homicidio
+            "homicidio": "Artículo sobre el delito de HOMICIDIO SIMPLE. El que matare a otro será sancionado con prisión de diez a veinte años. Homicidio doloso intencional. Art. 128, 129, 130.",
+            "homicidio simple": "Artículo sobre HOMICIDIO SIMPLE intencional doloso. El que matare a otro con intención será sancionado con prisión. Art. 128, 129. Homicidio básico sin agravantes.",
+            "homicidio culposo": "Artículo sobre HOMICIDIO CULPOSO. El que por culpa causare la muerte de otro será sancionado. Muerte por imprudencia, negligencia o impericia. Art. 132. Sin intención de matar.",
+            "homicidio agravado": "Artículo sobre HOMICIDIO AGRAVADO. El homicidio será sancionado con prisión de veinte a treinta años cuando concurrieren circunstancias agravantes. Asesinato, alevosía, ensañamiento. Art. 129.",
+
+            # Delitos contra la libertad - MUY específico
+            "secuestro": "Artículo sobre el delito de SECUESTRO. El que privare a otro de su libertad individual con el propósito de obtener rescate, cumplimiento de condición o para otros fines, será sancionado con prisión de diez a veinte años. Privación de libertad con fines específicos. Art. 149, 150, 151. Secuestro extorsivo.",
+            "privación de libertad": "Artículo sobre PRIVACIÓN DE LIBERTAD. El que privare a otro de su libertad personal será sancionado con prisión. Detención ilegal, encierro. Delitos contra la libertad individual.",
+
+            # Delitos sexuales
+            "violación": "Artículo sobre el delito de VIOLACIÓN. El que mediante violencia tuviere acceso carnal por vía vaginal o anal con otra persona será sancionado con prisión de seis a diez años. Violación sexual, agresión sexual.",
+
+            # Otros delitos
+            "estafa": "Artículo sobre el delito de ESTAFA. El que mediante engaño, artificio o ardid obtuviere para sí o para tercero un provecho injusto en perjuicio ajeno será sancionado. Defraudación, fraude. Art. 215, 216.",
+            "extorsión": "Artículo sobre el delito de EXTORSIÓN. El que mediante intimidación o amenaza obligare a otro a realizar, tolerar u omitir un acto en perjuicio de su patrimonio será sancionado. Art. 214.",
+
+            # Causas de justificación
+            "legítima defensa": "Artículo sobre LEGÍTIMA DEFENSA como causa de justificación y eximente de responsabilidad penal. No es punible quien actúa en defensa de su persona, honor o bienes, o de terceros, repeliendo una agresión ilegítima, actual o inminente. Art. 27. Defensa propia.",
+
             "default": "Artículo del Código Penal sobre delitos y penas. Sanción penal, prisión, multa, responsabilidad criminal."
         },
         "CIVIL": {
-            "default": "Artículo del Código Civil sobre obligaciones, contratos, propiedad, familia, sucesiones."
+            "matrimonio": "Artículo sobre el MATRIMONIO. El matrimonio es la unión legal de un hombre y una mujer con el fin de establecer una plena comunidad de vida. Requisitos, impedimentos, celebración.",
+            "divorcio": "Artículo sobre el DIVORCIO. El divorcio disuelve el vínculo matrimonial. Causales de divorcio, divorcio por mutuo consentimiento, efectos patrimoniales.",
+            "patria potestad": "Artículo sobre la PATRIA POTESTAD. La patria potestad es el conjunto de derechos y deberes que tienen los padres sobre los hijos menores. Autoridad parental, guarda, custodia.",
+            "herencia": "Artículo sobre la HERENCIA y sucesiones. La herencia comprende todos los bienes, derechos y obligaciones del causante. Sucesión testamentaria, sucesión intestada.",
+            "default": "Artículo del Código Civil o de Familia sobre obligaciones, contratos, propiedad, familia, sucesiones."
         },
         "LABORAL": {
+            "despido": "Artículo sobre el DESPIDO laboral. El patrono puede dar por terminado el contrato sin responsabilidad por causas justificadas. Despido justificado, injustificado, indemnización.",
+            "vacaciones": "Artículo sobre las VACACIONES del trabajador. Todo trabajador tiene derecho a un período de vacaciones remuneradas después de cada año de trabajo continuo. Art. 177. Quince días de vacaciones.",
+            "aguinaldo": "Artículo sobre el AGUINALDO. Todo patrono está obligado a dar a sus trabajadores una prima por cada año de trabajo. Art. 196, 197, 198, 199. Cálculo del aguinaldo.",
             "default": "Artículo del Código de Trabajo sobre relación laboral, derechos del trabajador, obligaciones del patrono."
         }
     }
@@ -946,11 +970,148 @@ async def config():
             total += client.get_collection(info["coleccion"]).points_count
         except:
             pass
-    
+
     return {
         "version": VERSION,
         "total_articulos": total,
         "num_conceptos": 0,
         "embedding_model": "hiiamsid/sentence_similarity_spanish_es",
         "paises_activos": len(PAISES)
+    }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS DE FEEDBACK
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Almacenamiento temporal de feedback (para producción usar base de datos)
+_feedback_storage = []
+
+class FeedbackRequest(BaseModel):
+    query: str
+    response_id: Optional[str] = None
+    rating: str  # "positive", "negative", "partial"
+    comment: Optional[str] = None
+    expected_code: Optional[str] = None  # Código esperado (PENAL, CIVIL, etc.)
+    received_code: Optional[str] = None  # Código recibido
+    articles_returned: Optional[List[str]] = None  # Lista de artículos devueltos
+    pais: str = "SV"
+
+class FeedbackResponse(BaseModel):
+    success: bool
+    feedback_id: str
+    message: str
+
+@app.post("/api/feedback", response_model=FeedbackResponse)
+async def enviar_feedback(
+    feedback: FeedbackRequest,
+    x_user_id: Optional[str] = Header(None)
+):
+    """
+    Recibe feedback sobre la calidad de las respuestas.
+    Útil para mejorar el sistema de RAG.
+    """
+    import uuid
+
+    feedback_id = str(uuid.uuid4())
+    user_id = x_user_id or "anonymous"
+
+    feedback_entry = {
+        "id": feedback_id,
+        "user_id": user_id,
+        "query": feedback.query,
+        "response_id": feedback.response_id,
+        "rating": feedback.rating,
+        "comment": feedback.comment,
+        "expected_code": feedback.expected_code,
+        "received_code": feedback.received_code,
+        "articles_returned": feedback.articles_returned,
+        "pais": feedback.pais,
+        "created_at": datetime.now().isoformat(),
+        "version": VERSION
+    }
+
+    _feedback_storage.append(feedback_entry)
+
+    # Log para análisis
+    rating_emoji = {"positive": "👍", "negative": "👎", "partial": "🔄"}.get(feedback.rating, "❓")
+    print(f"📝 Feedback {rating_emoji}: '{feedback.query}' - {feedback.comment or 'Sin comentario'}")
+
+    return FeedbackResponse(
+        success=True,
+        feedback_id=feedback_id,
+        message="Feedback recibido correctamente. ¡Gracias por ayudarnos a mejorar!"
+    )
+
+@app.get("/api/feedback")
+async def listar_feedback(
+    limit: int = Query(50, description="Número máximo de registros"),
+    rating: Optional[str] = Query(None, description="Filtrar por rating: positive, negative, partial")
+):
+    """
+    Lista el feedback recibido (para análisis).
+    """
+    feedback_list = _feedback_storage.copy()
+
+    # Filtrar por rating si se especifica
+    if rating:
+        feedback_list = [f for f in feedback_list if f.get("rating") == rating]
+
+    # Ordenar por fecha (más reciente primero) y limitar
+    feedback_list = sorted(feedback_list, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
+
+    # Estadísticas
+    total = len(_feedback_storage)
+    stats = {
+        "total": total,
+        "positive": len([f for f in _feedback_storage if f.get("rating") == "positive"]),
+        "negative": len([f for f in _feedback_storage if f.get("rating") == "negative"]),
+        "partial": len([f for f in _feedback_storage if f.get("rating") == "partial"]),
+    }
+
+    return {
+        "feedback": feedback_list,
+        "stats": stats,
+        "success_rate": round(stats["positive"] / total * 100, 2) if total > 0 else 0
+    }
+
+@app.get("/api/feedback/stats")
+async def estadisticas_feedback():
+    """
+    Estadísticas resumidas del feedback.
+    """
+    total = len(_feedback_storage)
+
+    if total == 0:
+        return {
+            "total": 0,
+            "message": "No hay feedback registrado aún"
+        }
+
+    # Contar por rating
+    by_rating = {
+        "positive": len([f for f in _feedback_storage if f.get("rating") == "positive"]),
+        "negative": len([f for f in _feedback_storage if f.get("rating") == "negative"]),
+        "partial": len([f for f in _feedback_storage if f.get("rating") == "partial"]),
+    }
+
+    # Contar por código esperado vs recibido (para detectar problemas)
+    mismatches = [f for f in _feedback_storage
+                  if f.get("expected_code") and f.get("received_code")
+                  and f.get("expected_code") != f.get("received_code")]
+
+    # Queries con feedback negativo (para priorizar mejoras)
+    problematic_queries = [
+        {"query": f.get("query"), "comment": f.get("comment"), "expected": f.get("expected_code")}
+        for f in _feedback_storage if f.get("rating") == "negative"
+    ]
+
+    return {
+        "total_feedback": total,
+        "by_rating": by_rating,
+        "success_rate": round(by_rating["positive"] / total * 100, 2),
+        "partial_rate": round(by_rating["partial"] / total * 100, 2),
+        "error_rate": round(by_rating["negative"] / total * 100, 2),
+        "code_mismatches": len(mismatches),
+        "problematic_queries": problematic_queries[:10],  # Top 10 queries problemáticas
+        "version": VERSION
     }
