@@ -271,10 +271,17 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[
+        "*",
+        "https://preview--ley-sv-chat-61609.lovable.app",
+        "https://ley-sv-chat-61609.lovable.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_credentials=False,  # Cambiar a False para permitir "*"
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Lazy loading
